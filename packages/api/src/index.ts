@@ -88,7 +88,11 @@ console.log(`Server is running on http://localhost:${port}`);
 import { startPayoutSweeper } from './services/payout';
 startPayoutSweeper();
 
-serve({
+const server = serve({
     fetch: app.fetch,
     port
 });
+
+import { initSocketServer } from './socket';
+initSocketServer(server);
+
