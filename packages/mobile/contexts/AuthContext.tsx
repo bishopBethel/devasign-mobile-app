@@ -13,6 +13,7 @@ interface AuthContextType {
     login: (token: string, refreshToken: string, user: AuthUser) => void;
     logout: () => Promise<void>;
     getAuthHeaders: () => Record<string, string>;
+    updateUser: (updatedFields: Partial<AuthUser>) => void;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
@@ -47,6 +48,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         localStorage.setItem('isAuthenticated', 'true');
         setToken(newToken);
         setUser(newUser);
+    }, []);
+
+    const updateUser = useCallback((updatedFields: Partial<AuthUser>) => {
+        setUser((prev) => {
+            if (!prev) return null;
+            const updated = { ...prev, ...updatedFields };
+            localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(updated));
+            return updated;
+        });
     }, []);
 
     const logout = useCallback(async () => {
@@ -97,7 +107,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }, []);
 
     return (
-        <AuthContext.Provider value={{ user, token, isAuthenticated, login, logout, getAuthHeaders }}>
+        <AuthContext.Provider value={{ user, token, isAuthenticated, login, logout, getAuthHeaders, updateUser }}>
             {children}
         </AuthContext.Provider>
     );

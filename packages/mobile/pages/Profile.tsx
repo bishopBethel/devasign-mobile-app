@@ -19,7 +19,7 @@ interface UserProfile {
 
 export const Profile: React.FC = () => {
   const navigate = useNavigate();
-  const { user, logout } = useAuth();
+  const { user, logout, updateUser } = useAuth();
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
 
   // Profile refresh / loading states
@@ -76,12 +76,12 @@ export const Profile: React.FC = () => {
         setProfileData(result.user);
         
         // Also update AuthContext user if avatarUrl or username changed
-        const storedUser = localStorage.getItem('auth_user');
-        if (storedUser) {
-          const parsed = JSON.parse(storedUser);
-          parsed.avatarUrl = result.user.avatarUrl || parsed.avatarUrl;
-          parsed.username = result.user.username || parsed.username;
-          localStorage.setItem('auth_user', JSON.stringify(parsed));
+        // Use updateUser() from useAuth() to trigger a re-render
+        if (result.user.avatarUrl || result.user.username) {
+          updateUser({
+            avatarUrl: result.user.avatarUrl || undefined,
+            username: result.user.username || undefined,
+          });
         }
 
         setTimeout(() => {

@@ -143,5 +143,33 @@ describe('Profile Routes (Refresh GitHub)', () => {
             expect(body.error).toBe('Failed to refresh GitHub profile');
             expect(body.details).toBe('GitHub API Error');
         });
+
+        it('should return 403 if the GitHub token belongs to a different user', async () => {
+            (jwt.verify as any).mockResolvedValue({ sub: 'user-123', username: 'testuser' });
+
+            const mockDifferentGithubUser = {
+                id: 54321,
+                login: 'differentuser',
+                email: 'diff@example.com',
+                avatar_url: 'https://synced.avatar.url',
+                public_repos: 10,
+            };
+
+            (githubService.getUserProfile as any).mockResolvedValue(mockDifferentGithubUser);
+
+            const req = new Request('http://localhost/api/profile/refresh-github', {
+                method: 'POST',
+                headers: {
+                    Authorization: 'Bearer valid_token',
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ githubAccessToken: 'valid-github-token' }),
+            });
+            const res = await app.fetch(req);
+
+            expect(res.status).toBe(403);
+            const body = await res.json();
+            expect(body.error).toBe('Provided GitHub token belongs to a different user');
+        });
     });
 });

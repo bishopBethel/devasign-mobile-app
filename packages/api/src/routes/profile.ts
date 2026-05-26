@@ -16,7 +16,7 @@ profileRoute.post('/refresh-github', async (c) => {
     try {
         const user = c.get('user');
         
-        if (!user || !user.id) {
+        if (!user || !user.id || !user.username) {
             return c.json({ error: 'Unauthorized' }, 401);
         }
 
@@ -31,6 +31,10 @@ profileRoute.post('/refresh-github', async (c) => {
         const githubUser = await githubService.getUserProfile(githubAccessToken);
         if (!githubUser) {
             return c.json({ error: 'Failed to fetch GitHub profile' }, 500);
+        }
+
+        if (githubUser.login.toLowerCase() !== user.username.toLowerCase()) {
+            return c.json({ error: 'Provided GitHub token belongs to a different user' }, 403);
         }
 
         // 2. Fetch tech stack data from GitHub
