@@ -141,6 +141,10 @@ interface RecommendedCacheEntry {
 const recommendedCache = new Map<string, RecommendedCacheEntry>();
 const CACHE_TTL_MS = 15 * 60 * 1000;
 
+export function invalidateRecommendedCache(userId: string) {
+    recommendedCache.delete(userId);
+}
+
 bountiesRouter.get('/recommended', async (c) => {
     const user = c.get('user');
     if (!user) {

@@ -55,4 +55,29 @@ usersRoute.post('/me/sync', async (c) => {
     }
 });
 
+/**
+ * GET /users/me
+ * Get authenticated user profile details from database
+ */
+usersRoute.get('/me', async (c) => {
+    try {
+        const user = c.get('user');
+        if (!user) {
+            return c.json({ error: 'Unauthorized' }, 401);
+        }
+
+        const dbUser = await db.query.users.findFirst({
+            where: eq(users.id, user.id),
+        });
+
+        if (!dbUser) {
+            return c.json({ error: 'User not found' }, 404);
+        }
+
+        return c.json(dbUser);
+    } catch (error: any) {
+        return c.json({ error: 'Failed to fetch profile', details: error.message }, 500);
+    }
+});
+
 export default usersRoute;
