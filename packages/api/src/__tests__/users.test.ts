@@ -24,6 +24,11 @@ vi.mock('../db', () => ({
                 })),
             })),
         })),
+        query: {
+            users: {
+                findFirst: vi.fn(),
+            },
+        },
     },
 }));
 
@@ -96,6 +101,42 @@ describe('Users Routes (Sync Profile)', () => {
             expect(res.status).toBe(500);
             const body = await res.json();
             expect(body.error).toBe('Failed to sync user profile');
+        });
+    });
+
+    describe('GET /api/users/me', () => {
+        it('should return 401 if unauthorized', async () => {
+            const res = await app.request('/api/users/me', { method: 'GET' });
+            expect(res.status).toBe(401);
+        });
+
+        it('should successfully return user details', async () => {
+            (jwt.verify as any).mockResolvedValue({ sub: 'user-123', username: 'testuser' });
+            const mockDbUser = {
+                id: 'user-123',
+                username: 'testuser',
+                avatarUrl: 'https://synced.avatar.url',
+                email: 'test@example.com',
+                publicRepos: 42,
+                techStack: ['React', 'TypeScript'],
+                totalEarned: '12500',
+                bountiesCompleted: 14,
+            };
+            vi.mocked(db.query.users.findFirst).mockResolvedValue(mockDbUser as any);
+
+            const req = new Request('http://localhost/api/users/me', {
+                method: 'GET',
+                headers: {
+                    Authorization: 'Bearer valid_token',
+                },
+            });
+            const res = await app.fetch(req);
+
+            expect(res.status).toBe(200);
+            const body = await res.json();
+            expect(body.username).toBe('testuser');
+            expect(body.techStack).toEqual(['React', 'TypeScript']);
+            expect(db.query.users.findFirst).toHaveBeenCalled();
         });
     });
 });
