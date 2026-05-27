@@ -241,6 +241,7 @@ export function initSocketServer(server: any): SocketIOServer {
                     }
 
                     // 2. Update if not already read
+                    let newlyRead = false;
                     if (!message.readAt) {
                         const [updated] = await db
                             .update(messages)
@@ -249,6 +250,7 @@ export function initSocketServer(server: any): SocketIOServer {
                             .returning();
                         if (updated) {
                             updatedMessages.push(updated);
+                            newlyRead = true;
                         }
                     } else {
                         // Already read, just return the message
@@ -256,7 +258,7 @@ export function initSocketServer(server: any): SocketIOServer {
                     }
 
                     // Broadcast the read receipt to the bounty room
-                    if (updatedMessages.length > 0) {
+                    if (newlyRead) {
                         io?.to(`bounty:${message.bountyId}`).emit('message:read', {
                             bountyId: message.bountyId,
                             messageIds: [messageId],

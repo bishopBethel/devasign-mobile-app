@@ -669,7 +669,7 @@ describe('Socket.io WebSocket Server', () => {
                 expect(ack.error).toContain('Invalid parameters');
 
                 client.close();
+            });
         });
     });
-});
 });
