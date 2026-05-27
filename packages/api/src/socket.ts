@@ -2,7 +2,7 @@ import { Server as SocketIOServer } from 'socket.io';
 import { verify } from 'hono/jwt';
 import { db } from './db';
 import { bounties, messages } from './db/schema';
-import { eq, or, and, ne } from 'drizzle-orm';
+import { eq, or, and, ne, isNull } from 'drizzle-orm';
 import { sanitizeHTML } from './utils/sanitize';
 import { sendPushNotification } from './services/notifications';
 
@@ -201,6 +201,119 @@ export function initSocketServer(server: any): SocketIOServer {
                 }
             } catch (error: any) {
                 console.error('Error handling message:send:', error);
+                if (typeof callback === 'function') {
+                    callback({ success: false, error: error.message });
+                } else {
+                    socket.emit('message:error', { error: error.message });
+                }
+            }
+        });
+
+        // Real-time Read Receipts Handler: Listen for messages marked as read
+        socket.on('message:read', async (data: { messageId?: string; bountyId?: string }, callback?: any) => {
+            try {
+                const { messageId, bountyId } = data || {};
+
+                if (!messageId && !bountyId) {
+                    throw new Error('Invalid parameters: messageId or bountyId is required.');
+                }
+
+                const readAt = new Date();
+                let updatedMessages: any[] = [];
+
+                if (messageId) {
+                    if (typeof messageId !== 'string') {
+                        throw new Error('messageId must be a string.');
+                    }
+
+                    // 1. Fetch the message to get details and verify authorization
+                    const message = await db.query.messages.findFirst({
+                        where: eq(messages.id, messageId)
+                    });
+
+                    if (!message) {
+                        throw new Error('Message not found.');
+                    }
+
+                    // Verify recipient is the current user
+                    if (message.recipientId !== user.id) {
+                        throw new Error('Unauthorized: You are not the recipient of this message.');
+                    }
+
+                    // 2. Update if not already read
+                    let newlyRead = false;
+                    if (!message.readAt) {
+                        const [updated] = await db
+                            .update(messages)
+                            .set({ readAt })
+                            .where(eq(messages.id, messageId))
+                            .returning();
+                        if (updated) {
+                            updatedMessages.push(updated);
+                            newlyRead = true;
+                        }
+                    } else {
+                        // Already read, just return the message
+                        updatedMessages.push(message);
+                    }
+
+                    // Broadcast the read receipt to the bounty room
+                    if (newlyRead) {
+                        io?.to(`bounty:${message.bountyId}`).emit('message:read', {
+                            bountyId: message.bountyId,
+                            messageIds: [messageId],
+                            readerId: user.id,
+                            readAt
+                        });
+                    }
+                } else if (bountyId) {
+                    if (typeof bountyId !== 'string') {
+                        throw new Error('bountyId must be a string.');
+                    }
+
+                    // 1. Verify user is participant of the bounty (creator or assignee)
+                    const bounty = await db.query.bounties.findFirst({
+                        where: eq(bounties.id, bountyId)
+                    });
+
+                    if (!bounty) {
+                        throw new Error('Bounty not found.');
+                    }
+
+                    if (bounty.creatorId !== user.id && bounty.assigneeId !== user.id) {
+                        throw new Error('Unauthorized: You are not an active participant of this bounty.');
+                    }
+
+                    // 2. Update all unread messages for this bounty where the user is recipient
+                    updatedMessages = await db
+                        .update(messages)
+                        .set({ readAt })
+                        .where(
+                            and(
+                                eq(messages.bountyId, bountyId),
+                                eq(messages.recipientId, user.id),
+                                isNull(messages.readAt)
+                            )
+                        )
+                        .returning();
+
+                    // Broadcast to the bounty room
+                    if (updatedMessages.length > 0) {
+                        const messageIds = updatedMessages.map(m => m.id);
+                        io?.to(`bounty:${bountyId}`).emit('message:read', {
+                            bountyId,
+                            messageIds,
+                            readerId: user.id,
+                            readAt
+                        });
+                    }
+                }
+
+                if (typeof callback === 'function') {
+                    callback({ success: true, messages: updatedMessages });
+                }
+            } catch (error: any) {
+                console.error('Error handling message:read:', error);
                 if (typeof callback === 'function') {
                     callback({ success: false, error: error.message });
                 } else {

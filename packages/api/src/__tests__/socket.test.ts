@@ -25,12 +25,24 @@ const mockSelect = vi.fn().mockReturnValue({
 });
 
 const mockFindFirst = vi.fn();
+const mockFindFirstMessage = vi.fn();
 const mockReturning = vi.fn();
 const mockInsertValues = vi.fn().mockReturnValue({
     returning: mockReturning,
 });
 const mockInsert = vi.fn().mockReturnValue({
     values: mockInsertValues,
+});
+
+const mockUpdateReturning = vi.fn();
+const mockUpdateWhere = vi.fn().mockReturnValue({
+    returning: mockUpdateReturning,
+});
+const mockUpdateSet = vi.fn().mockReturnValue({
+    where: mockUpdateWhere,
+});
+const mockUpdate = vi.fn().mockReturnValue({
+    set: mockUpdateSet,
 });
 
 // Mock the database (only src/db/index.ts)
@@ -41,8 +53,12 @@ vi.mock('../db', () => ({
             bounties: {
                 findFirst: (...args: any[]) => mockFindFirst(...args),
             },
+            messages: {
+                findFirst: (...args: any[]) => mockFindFirstMessage(...args),
+            },
         },
         insert: (...args: any[]) => mockInsert(...args),
+        update: (...args: any[]) => mockUpdate(...args),
     },
 }));
 
@@ -399,6 +415,261 @@ describe('Socket.io WebSocket Server', () => {
             expect(ack.error).toContain('Cannot send messages for completed or cancelled bounties');
 
             creatorClient.close();
+        });
+
+        describe('Read Receipts (message:read)', () => {
+            it('should mark a specific message as read and broadcast event', async () => {
+                const messageId = 'msg-123';
+                // Mock current user as recipient
+                vi.mocked(verify).mockResolvedValue({
+                    sub: creatorId,
+                    username: 'creatorUser',
+                });
+                mockWhere.mockResolvedValue([]);
+
+                // Mock finding the message where user is recipient
+                mockFindFirstMessage.mockResolvedValue({
+                    id: messageId,
+                    bountyId,
+                    senderId: assigneeId,
+                    recipientId: creatorId,
+                    content: 'Hello!',
+                    readAt: null,
+                });
+
+                // Mock db.update returning the updated message
+                const updatedMsg = {
+                    id: messageId,
+                    bountyId,
+                    senderId: assigneeId,
+                    recipientId: creatorId,
+                    content: 'Hello!',
+                    readAt: new Date(),
+                };
+                mockUpdateReturning.mockResolvedValue([updatedMsg]);
+
+                const client = Client(`http://localhost:${port}`, {
+                    autoConnect: false,
+                    auth: { token: 'creator-token' },
+                });
+
+                await new Promise<void>((resolve) => {
+                    client.on('connect', resolve);
+                    client.connect();
+                });
+
+                // Join the room manually
+                const sockets = await ioServer.fetchSockets();
+                const serverSocket = sockets.find((s: any) => s.id === client.id);
+                await serverSocket.join(`bounty:${bountyId}`);
+
+                // Listen for message:read broadcast
+                const receivedBroadcast = new Promise<any>((resolve) => {
+                    client.on('message:read', resolve);
+                });
+
+                const ackPromise = new Promise<any>((resolve) => {
+                    client.emit('message:read', { messageId }, (ack: any) => {
+                        resolve(ack);
+                    });
+                });
+
+                const ack = await ackPromise;
+                expect(ack.success).toBe(true);
+                expect(ack.messages[0].id).toBe(messageId);
+                expect(ack.messages[0].readAt).toBeDefined();
+
+                const broadcast = await receivedBroadcast;
+                expect(broadcast.bountyId).toBe(bountyId);
+                expect(broadcast.messageIds).toContain(messageId);
+                expect(broadcast.readerId).toBe(creatorId);
+
+                client.close();
+            });
+
+            it('should mark all unread messages in a bounty room as read and broadcast event', async () => {
+                // Mock current user as recipient (creatorId)
+                vi.mocked(verify).mockResolvedValue({
+                    sub: creatorId,
+                    username: 'creatorUser',
+                });
+                mockWhere.mockResolvedValue([]);
+
+                // Mock finding the bounty
+                mockFindFirst.mockResolvedValue({
+                    id: bountyId,
+                    creatorId,
+                    assigneeId,
+                });
+
+                // Mock db.update returning all updated messages
+                const updatedMsg1 = {
+                    id: 'msg-1',
+                    bountyId,
+                    senderId: assigneeId,
+                    recipientId: creatorId,
+                    content: 'First message',
+                    readAt: new Date(),
+                };
+                const updatedMsg2 = {
+                    id: 'msg-2',
+                    bountyId,
+                    senderId: assigneeId,
+                    recipientId: creatorId,
+                    content: 'Second message',
+                    readAt: new Date(),
+                };
+                mockUpdateReturning.mockResolvedValue([updatedMsg1, updatedMsg2]);
+
+                const client = Client(`http://localhost:${port}`, {
+                    autoConnect: false,
+                    auth: { token: 'creator-token' },
+                });
+
+                await new Promise<void>((resolve) => {
+                    client.on('connect', resolve);
+                    client.connect();
+                });
+
+                // Join the room manually
+                const sockets = await ioServer.fetchSockets();
+                const serverSocket = sockets.find((s: any) => s.id === client.id);
+                await serverSocket.join(`bounty:${bountyId}`);
+
+                // Listen for message:read broadcast
+                const receivedBroadcast = new Promise<any>((resolve) => {
+                    client.on('message:read', resolve);
+                });
+
+                const ackPromise = new Promise<any>((resolve) => {
+                    client.emit('message:read', { bountyId }, (ack: any) => {
+                        resolve(ack);
+                    });
+                });
+
+                const ack = await ackPromise;
+                expect(ack.success).toBe(true);
+                expect(ack.messages.length).toBe(2);
+                expect(ack.messages[0].id).toBe('msg-1');
+                expect(ack.messages[1].id).toBe('msg-2');
+
+                const broadcast = await receivedBroadcast;
+                expect(broadcast.bountyId).toBe(bountyId);
+                expect(broadcast.messageIds).toContain('msg-1');
+                expect(broadcast.messageIds).toContain('msg-2');
+                expect(broadcast.readerId).toBe(creatorId);
+
+                client.close();
+            });
+
+            it('should fail if user is not the recipient of the specific message', async () => {
+                const messageId = 'msg-123';
+                // User is creatorId, but message recipient is assigneeId
+                vi.mocked(verify).mockResolvedValue({
+                    sub: creatorId,
+                    username: 'creatorUser',
+                });
+                mockWhere.mockResolvedValue([]);
+
+                mockFindFirstMessage.mockResolvedValue({
+                    id: messageId,
+                    bountyId,
+                    senderId: creatorId,
+                    recipientId: assigneeId, // recipient is assignee, not creator
+                    content: 'Hello!',
+                    readAt: null,
+                });
+
+                const client = Client(`http://localhost:${port}`, {
+                    autoConnect: false,
+                    auth: { token: 'creator-token' },
+                });
+
+                await new Promise<void>((resolve) => {
+                    client.on('connect', resolve);
+                    client.connect();
+                });
+
+                const ackPromise = new Promise<any>((resolve) => {
+                    client.emit('message:read', { messageId }, (ack: any) => {
+                        resolve(ack);
+                    });
+                });
+
+                const ack = await ackPromise;
+                expect(ack.success).toBe(false);
+                expect(ack.error).toContain('Unauthorized');
+
+                client.close();
+            });
+
+            it('should fail if user is not a participant of the bounty when marking by bountyId', async () => {
+                // User is creatorId
+                vi.mocked(verify).mockResolvedValue({
+                    sub: creatorId,
+                    username: 'creatorUser',
+                });
+                mockWhere.mockResolvedValue([]);
+
+                // Bounty belongs to different users
+                mockFindFirst.mockResolvedValue({
+                    id: bountyId,
+                    creatorId: 'other-creator',
+                    assigneeId: 'other-assignee',
+                });
+
+                const client = Client(`http://localhost:${port}`, {
+                    autoConnect: false,
+                    auth: { token: 'creator-token' },
+                });
+
+                await new Promise<void>((resolve) => {
+                    client.on('connect', resolve);
+                    client.connect();
+                });
+
+                const ackPromise = new Promise<any>((resolve) => {
+                    client.emit('message:read', { bountyId }, (ack: any) => {
+                        resolve(ack);
+                    });
+                });
+
+                const ack = await ackPromise;
+                expect(ack.success).toBe(false);
+                expect(ack.error).toContain('Unauthorized');
+
+                client.close();
+            });
+
+            it('should fail if neither messageId nor bountyId is provided', async () => {
+                vi.mocked(verify).mockResolvedValue({
+                    sub: creatorId,
+                    username: 'creatorUser',
+                });
+                mockWhere.mockResolvedValue([]);
+
+                const client = Client(`http://localhost:${port}`, {
+                    autoConnect: false,
+                    auth: { token: 'creator-token' },
+                });
+
+                await new Promise<void>((resolve) => {
+                    client.on('connect', resolve);
+                    client.connect();
+                });
+
+                const ackPromise = new Promise<any>((resolve) => {
+                    client.emit('message:read', {}, (ack: any) => {
+                        resolve(ack);
+                    });
+                });
+
+                const ack = await ackPromise;
+                expect(ack.success).toBe(false);
+                expect(ack.error).toContain('Invalid parameters');
+
+                client.close();
+            });
         });
     });
 });
