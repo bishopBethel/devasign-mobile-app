@@ -1,13 +1,19 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { createServer, Server as HTTPServer } from 'http';
 import { io as Client } from 'socket.io-client';
 import { verify } from 'hono/jwt';
-import { initSocketServer } from '../socket';
+import { initSocketServer, activeUsers } from '../socket';
+import { sendPushNotification } from '../services/notifications';
 import type { AddressInfo } from 'net';
 
 // Mock hono/jwt verify
 vi.mock('hono/jwt', () => ({
     verify: vi.fn(),
+}));
+
+// Mock notifications service
+vi.mock('../services/notifications', () => ({
+    sendPushNotification: vi.fn().mockResolvedValue(undefined),
 }));
 
 const mockWhere = vi.fn();
@@ -18,10 +24,25 @@ const mockSelect = vi.fn().mockReturnValue({
     from: mockFrom,
 });
 
+const mockFindFirst = vi.fn();
+const mockReturning = vi.fn();
+const mockInsertValues = vi.fn().mockReturnValue({
+    returning: mockReturning,
+});
+const mockInsert = vi.fn().mockReturnValue({
+    values: mockInsertValues,
+});
+
 // Mock the database (only src/db/index.ts)
 vi.mock('../db', () => ({
     db: {
         select: (...args: any[]) => mockSelect(...args),
+        query: {
+            bounties: {
+                findFirst: (...args: any[]) => mockFindFirst(...args),
+            },
+        },
+        insert: (...args: any[]) => mockInsert(...args),
     },
 }));
 
@@ -56,6 +77,11 @@ describe('Socket.io WebSocket Server', () => {
                 });
             });
         });
+    });
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        activeUsers.clear();
     });
 
     it('should reject connection when no token is provided', async () => {
@@ -149,5 +175,230 @@ describe('Socket.io WebSocket Server', () => {
         expect(rooms).toContain('bounty:bounty-xyz');
 
         client.close();
+    });
+
+    describe('Messaging Integration', () => {
+        const bountyId = 'bounty-456';
+        const creatorId = 'creator-111';
+        const assigneeId = 'assignee-222';
+
+        beforeEach(() => {
+            // Setup db mocks for bounty checks
+            mockFindFirst.mockResolvedValue({
+                id: bountyId,
+                creatorId,
+                assigneeId,
+                title: 'Build WebSockets',
+            });
+
+            // Mock database insert returning the saved message
+            mockReturning.mockImplementation((values: any) => [
+                {
+                    id: 'msg-999',
+                    bountyId,
+                    senderId: creatorId,
+                    recipientId: assigneeId,
+                    content: values?.content || 'hello',
+                    createdAt: new Date(),
+                }
+            ]);
+        });
+
+        it('should send a message, persist to database with XSS sanitization, broadcast to bounty room, and trigger push notification for offline recipient', async () => {
+            // Mock jwt verification for the sender (creator)
+            vi.mocked(verify).mockResolvedValue({
+                sub: creatorId,
+                username: 'creatorUser',
+                exp: Math.floor(Date.now() / 1000) + 3600,
+            });
+
+            // Mock no active rooms to return
+            mockWhere.mockResolvedValue([]);
+
+            const creatorClient = Client(`http://localhost:${port}`, {
+                autoConnect: false,
+                auth: {
+                    token: 'creator-token',
+                },
+            });
+
+            // Connect the creator
+            await new Promise<void>((resolve) => {
+                creatorClient.on('connect', resolve);
+                creatorClient.connect();
+            });
+
+            // Listen for message broadcasts in the room (we also need the sender to join the room)
+            // By default connection joins rooms, let's join manually to be absolutely sure
+            const sockets = await ioServer.fetchSockets();
+            const creatorSocket = sockets.find((s: any) => s.id === creatorClient.id);
+            await creatorSocket.join(`bounty:${bountyId}`);
+
+            const receivedBroadcast = new Promise<any>((resolve) => {
+                creatorClient.on('message:new', (msg) => {
+                    resolve(msg);
+                });
+            });
+
+            // Emit message:send with potential XSS scripts
+            const xssContent = '<script>alert("XSS")</script> Perfect!';
+            const ackPromise = new Promise<any>((resolve) => {
+                creatorClient.emit('message:send', { bountyId, content: xssContent }, (ack: any) => {
+                    resolve(ack);
+                });
+            });
+
+            const ack = await ackPromise;
+            expect(ack.success).toBe(true);
+            expect(ack.message.id).toBe('msg-999');
+
+            // Verify XSS sanitization occurred in database insert call
+            expect(mockInsert).toHaveBeenCalled();
+            expect(mockInsertValues).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    content: '&lt;script&gt;alert(&quot;XSS&quot;)&lt;/script&gt; Perfect!',
+                })
+            );
+
+            // Verify broadcasting is received
+            const broadcast = await receivedBroadcast;
+            expect(broadcast.id).toBe('msg-999');
+
+            // Verify push notification is triggered since recipient is offline (assigneeId is not connected)
+            expect(sendPushNotification).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    recipientId: assigneeId,
+                    title: expect.stringContaining('Build WebSockets'),
+                    body: expect.stringContaining('<script>'),
+                })
+            );
+
+            creatorClient.close();
+        });
+
+        it('should NOT trigger push notification when the recipient is online', async () => {
+            // Mock creator JWT
+            vi.mocked(verify).mockResolvedValueOnce({
+                sub: assigneeId,
+                username: 'assigneeUser',
+            }).mockResolvedValueOnce({
+                sub: creatorId,
+                username: 'creatorUser',
+            });
+
+            // Mock no active rooms
+            mockWhere.mockResolvedValue([]);
+
+            // Connect assignee client to mark them online
+            const assigneeClient = Client(`http://localhost:${port}`, {
+                autoConnect: false,
+                auth: {
+                    token: 'assignee-token',
+                },
+            });
+
+            await new Promise<void>((resolve) => {
+                assigneeClient.on('connect', resolve);
+                assigneeClient.connect();
+            });
+
+            // Connect creator client
+            const creatorClient = Client(`http://localhost:${port}`, {
+                autoConnect: false,
+                auth: {
+                    token: 'creator-token',
+                },
+            });
+
+            await new Promise<void>((resolve) => {
+                creatorClient.on('connect', resolve);
+                creatorClient.connect();
+            });
+
+            // Creator sends message
+            const ackPromise = new Promise<any>((resolve) => {
+                creatorClient.emit('message:send', { bountyId, content: 'Hey!' }, (ack: any) => {
+                    resolve(ack);
+                });
+            });
+
+            const ack = await ackPromise;
+            expect(ack.success).toBe(true);
+
+            // Since assignee was connected and active, push notification should NOT have been triggered
+            expect(sendPushNotification).not.toHaveBeenCalled();
+
+            assigneeClient.close();
+            creatorClient.close();
+        });
+
+        it('should fail to send a message if content exceeds 5000 characters', async () => {
+            vi.mocked(verify).mockResolvedValue({
+                sub: creatorId,
+                username: 'creatorUser',
+            });
+            mockWhere.mockResolvedValue([]);
+
+            const creatorClient = Client(`http://localhost:${port}`, {
+                autoConnect: false,
+                auth: { token: 'creator-token' },
+            });
+
+            await new Promise<void>((resolve) => {
+                creatorClient.on('connect', resolve);
+                creatorClient.connect();
+            });
+
+            const longContent = 'A'.repeat(5001);
+            const ackPromise = new Promise<any>((resolve) => {
+                creatorClient.emit('message:send', { bountyId, content: longContent }, (ack: any) => {
+                    resolve(ack);
+                });
+            });
+
+            const ack = await ackPromise;
+            expect(ack.success).toBe(false);
+            expect(ack.error).toContain('Message content exceeds the maximum allowed length');
+
+            creatorClient.close();
+        });
+
+        it('should fail to send a message if bounty is completed or cancelled', async () => {
+            vi.mocked(verify).mockResolvedValue({
+                sub: creatorId,
+                username: 'creatorUser',
+            });
+            mockWhere.mockResolvedValue([]);
+
+            // Mock completed bounty
+            mockFindFirst.mockResolvedValueOnce({
+                id: bountyId,
+                creatorId,
+                assigneeId,
+                status: 'completed',
+            });
+
+            const creatorClient = Client(`http://localhost:${port}`, {
+                autoConnect: false,
+                auth: { token: 'creator-token' },
+            });
+
+            await new Promise<void>((resolve) => {
+                creatorClient.on('connect', resolve);
+                creatorClient.connect();
+            });
+
+            const ackPromise = new Promise<any>((resolve) => {
+                creatorClient.emit('message:send', { bountyId, content: 'Hey' }, (ack: any) => {
+                    resolve(ack);
+                });
+            });
+
+            const ack = await ackPromise;
+            expect(ack.success).toBe(false);
+            expect(ack.error).toContain('Cannot send messages for completed or cancelled bounties');
+
+            creatorClient.close();
+        });
     });
 });

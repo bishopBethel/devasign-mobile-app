@@ -1,11 +1,15 @@
 import { Server as SocketIOServer } from 'socket.io';
 import { verify } from 'hono/jwt';
 import { db } from './db';
-import { bounties } from './db/schema';
+import { bounties, messages } from './db/schema';
 import { eq, or, and, ne } from 'drizzle-orm';
-
+import { sanitizeHTML } from './utils/sanitize';
+import { sendPushNotification } from './services/notifications';
 
 let io: SocketIOServer | null = null;
+
+// Track connected users in-memory for efficient online checks (userId -> socketIds[])
+export const activeUsers = new Map<string, string[]>();
 
 export interface SocketData {
     user: {
@@ -90,6 +94,11 @@ export function initSocketServer(server: any): SocketIOServer {
 
         console.log(`User ${user.username || user.id} connected via socket ${socket.id}`);
 
+        // Register user connection in activeUsers tracking map
+        const socketIds = activeUsers.get(user.id) || [];
+        socketIds.push(socket.id);
+        activeUsers.set(user.id, socketIds);
+
         try {
             // Query active bounties where the user is creator or assignee
             const activeBounties = await db
@@ -116,8 +125,102 @@ export function initSocketServer(server: any): SocketIOServer {
             console.error(`Error joining active bounty rooms for user ${user.id}:`, error);
         }
 
+        // Real-time Messaging Handler: Listen for messages sent by the client
+        socket.on('message:send', async (data: { bountyId: string; content: string }, callback?: any) => {
+            try {
+                const { bountyId, content } = data;
+                if (!bountyId || typeof bountyId !== 'string' || !content || typeof content !== 'string' || content.trim() === '') {
+                    throw new Error('Invalid parameters: bountyId and content are required and must be strings.');
+                }
+                if (content.length > 5000) {
+                    throw new Error('Message content exceeds the maximum allowed length.');
+                }
+
+                // 1. Fetch bounty and check existence
+                const bounty = await db.query.bounties.findFirst({
+                    where: eq(bounties.id, bountyId)
+                });
+
+                if (!bounty) {
+                    throw new Error('Bounty not found.');
+                }
+
+                // 2. Validate sender is either creator or assignee
+                const isCreator = bounty.creatorId === user.id;
+                const isAssignee = bounty.assigneeId === user.id;
+
+                if (!isCreator && !isAssignee) {
+                    throw new Error('Unauthorized: You are not an active participant of this bounty.');
+                }
+
+                if (bounty.status === 'completed' || bounty.status === 'cancelled') {
+                    throw new Error('Cannot send messages for completed or cancelled bounties.');
+                }
+
+                // 3. Determine recipientId (the other active participant of the bounty)
+                const recipientId = isCreator ? bounty.assigneeId : bounty.creatorId;
+                if (!recipientId) {
+                    throw new Error('No recipient found. Messages can only be sent once a developer is assigned to the bounty.');
+                }
+
+                // 4. Sanitize message content to completely mitigate Stored XSS
+                const sanitizedContent = sanitizeHTML(content);
+
+                // 5. Persist the sanitized message to PostgreSQL database
+                const [newMessage] = await db.insert(messages).values({
+                    bountyId,
+                    senderId: user.id,
+                    recipientId,
+                    content: sanitizedContent
+                }).returning();
+
+                // 6. Broadcast the message to all clients in the bounty room
+                io?.to(`bounty:${bountyId}`).emit('message:new', newMessage);
+
+                // 7. Check if the recipient is online
+                const isRecipientOnline = activeUsers.has(recipientId);
+
+                // 8. Trigger push notification for offline recipients
+                if (!isRecipientOnline) {
+                    sendPushNotification({
+                        recipientId,
+                        title: `New message on bounty: ${bounty.title}`,
+                        body: `${user.username || 'A developer'} sent you a message: ${content}`,
+                        data: {
+                            bountyId,
+                            messageId: newMessage.id
+                        }
+                    }).catch(err => {
+                        console.error('Failed to trigger push notification:', err);
+                    });
+                }
+
+                // Call client acknowledgment if provided
+                if (typeof callback === 'function') {
+                    callback({ success: true, message: newMessage });
+                }
+            } catch (error: any) {
+                console.error('Error handling message:send:', error);
+                if (typeof callback === 'function') {
+                    callback({ success: false, error: error.message });
+                } else {
+                    socket.emit('message:error', { error: error.message });
+                }
+            }
+        });
+
+        // Disconnect handler
         socket.on('disconnect', (reason) => {
             console.log(`User ${user.username || user.id} (socket ${socket.id}) disconnected. Reason: ${reason}`);
+            
+            // Remove socket from tracking map
+            const currentSocketIds = activeUsers.get(user.id) || [];
+            const remaining = currentSocketIds.filter(id => id !== socket.id);
+            if (remaining.length > 0) {
+                activeUsers.set(user.id, remaining);
+            } else {
+                activeUsers.delete(user.id);
+            }
         });
     });
 
