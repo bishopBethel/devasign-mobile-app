@@ -269,7 +269,7 @@ describe('Socket.io WebSocket Server', () => {
                 expect.objectContaining({
                     recipientId: assigneeId,
                     title: expect.stringContaining('Build WebSockets'),
-                    body: expect.stringContaining('&lt;script&gt;'),
+                    body: expect.stringContaining('<script>'),
                 })
             );
 
@@ -329,6 +329,75 @@ describe('Socket.io WebSocket Server', () => {
             expect(sendPushNotification).not.toHaveBeenCalled();
 
             assigneeClient.close();
+            creatorClient.close();
+        });
+
+        it('should fail to send a message if content exceeds 5000 characters', async () => {
+            vi.mocked(verify).mockResolvedValue({
+                sub: creatorId,
+                username: 'creatorUser',
+            });
+            mockWhere.mockResolvedValue([]);
+
+            const creatorClient = Client(`http://localhost:${port}`, {
+                autoConnect: false,
+                auth: { token: 'creator-token' },
+            });
+
+            await new Promise<void>((resolve) => {
+                creatorClient.on('connect', resolve);
+                creatorClient.connect();
+            });
+
+            const longContent = 'A'.repeat(5001);
+            const ackPromise = new Promise<any>((resolve) => {
+                creatorClient.emit('message:send', { bountyId, content: longContent }, (ack: any) => {
+                    resolve(ack);
+                });
+            });
+
+            const ack = await ackPromise;
+            expect(ack.success).toBe(false);
+            expect(ack.error).toContain('Message content exceeds the maximum allowed length');
+
+            creatorClient.close();
+        });
+
+        it('should fail to send a message if bounty is completed or cancelled', async () => {
+            vi.mocked(verify).mockResolvedValue({
+                sub: creatorId,
+                username: 'creatorUser',
+            });
+            mockWhere.mockResolvedValue([]);
+
+            // Mock completed bounty
+            mockFindFirst.mockResolvedValueOnce({
+                id: bountyId,
+                creatorId,
+                assigneeId,
+                status: 'completed',
+            });
+
+            const creatorClient = Client(`http://localhost:${port}`, {
+                autoConnect: false,
+                auth: { token: 'creator-token' },
+            });
+
+            await new Promise<void>((resolve) => {
+                creatorClient.on('connect', resolve);
+                creatorClient.connect();
+            });
+
+            const ackPromise = new Promise<any>((resolve) => {
+                creatorClient.emit('message:send', { bountyId, content: 'Hey' }, (ack: any) => {
+                    resolve(ack);
+                });
+            });
+
+            const ack = await ackPromise;
+            expect(ack.success).toBe(false);
+            expect(ack.error).toContain('Cannot send messages for completed or cancelled bounties');
+
             creatorClient.close();
         });
     });

@@ -129,8 +129,11 @@ export function initSocketServer(server: any): SocketIOServer {
         socket.on('message:send', async (data: { bountyId: string; content: string }, callback?: any) => {
             try {
                 const { bountyId, content } = data;
-                if (!bountyId || !content || typeof content !== 'string' || content.trim() === '') {
-                    throw new Error('Invalid parameters: bountyId and content are required.');
+                if (!bountyId || typeof bountyId !== 'string' || !content || typeof content !== 'string' || content.trim() === '') {
+                    throw new Error('Invalid parameters: bountyId and content are required and must be strings.');
+                }
+                if (content.length > 5000) {
+                    throw new Error('Message content exceeds the maximum allowed length.');
                 }
 
                 // 1. Fetch bounty and check existence
@@ -148,6 +151,10 @@ export function initSocketServer(server: any): SocketIOServer {
 
                 if (!isCreator && !isAssignee) {
                     throw new Error('Unauthorized: You are not an active participant of this bounty.');
+                }
+
+                if (bounty.status === 'completed' || bounty.status === 'cancelled') {
+                    throw new Error('Cannot send messages for completed or cancelled bounties.');
                 }
 
                 // 3. Determine recipientId (the other active participant of the bounty)
@@ -178,7 +185,7 @@ export function initSocketServer(server: any): SocketIOServer {
                     sendPushNotification({
                         recipientId,
                         title: `New message on bounty: ${bounty.title}`,
-                        body: `${user.username || 'A developer'} sent you a message: ${sanitizedContent}`,
+                        body: `${user.username || 'A developer'} sent you a message: ${content}`,
                         data: {
                             bountyId,
                             messageId: newMessage.id
