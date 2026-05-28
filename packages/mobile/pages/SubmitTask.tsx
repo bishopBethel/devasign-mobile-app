@@ -186,7 +186,7 @@ export const SubmitTask: React.FC = () => {
                    className="flex items-center justify-center gap-2 font-bold bg-primary hover:bg-primary/90 text-black shadow-lg shadow-primary/20 h-14 text-lg"
                    disabled={isSubmitting || !prUrl}
                 >
-                   {isSubmitting ? 'Submitting...' : 'Submit Task'} 
+                   {isSubmitting ? 'Submitting...' : 'Send for review'} 
                    {!isSubmitting && <ArrowUpRight size={22} strokeWidth={2.5} />}
                 </Button>
              </div>
