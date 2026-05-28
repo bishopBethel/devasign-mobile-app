@@ -255,21 +255,14 @@ describe('GET /api/conversations/:bountyId/messages', () => {
         ];
 
         // Mock chained query calls for paginated messages
-        const mockOffset = vi.fn().mockResolvedValue(mockMessages);
-        const mockLimit = vi.fn().mockReturnValue({ offset: mockOffset });
+        const mockLimit = vi.fn().mockResolvedValue(mockMessages);
         const mockOrderBy = vi.fn().mockReturnValue({ limit: mockLimit });
         const mockWhere = vi.fn().mockReturnValue({ orderBy: mockOrderBy });
         const mockFrom = vi.fn().mockReturnValue({ where: mockWhere });
 
-        // Mock count selection
-        const mockCountWhere = vi.fn().mockResolvedValue([{ value: 2 }]);
-        const mockCountFrom = vi.fn().mockReturnValue({ where: mockCountWhere });
+        mockSelect.mockReturnValueOnce({ from: mockFrom });
 
-        mockSelect
-            .mockReturnValueOnce({ from: mockFrom })
-            .mockReturnValueOnce({ from: mockCountFrom });
-
-        const res = await app.request(`/api/conversations/${bountyId}/messages?page=1&limit=10`, {
+        const res = await app.request(`/api/conversations/${bountyId}/messages?limit=10`, {
             headers: {
                 'Authorization': 'Bearer valid.token'
             }
@@ -280,9 +273,8 @@ describe('GET /api/conversations/:bountyId/messages', () => {
 
         expect(body.data).toHaveLength(2);
         expect(body.data[0].id).toBe('msg-1');
-        expect(body.meta.total).toBe(2);
-        expect(body.meta.page).toBe(1);
+        expect(body.meta.has_more).toBe(false);
+        expect(body.meta.next_cursor).toBeNull();
         expect(body.meta.limit).toBe(10);
-        expect(body.meta.totalPages).toBe(1);
     });
 });

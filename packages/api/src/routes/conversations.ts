@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { db } from '../db';
 import { bounties, messages, users } from '../db/schema';
-import { eq, or, and, ne, isNotNull, desc, isNull, count } from 'drizzle-orm';
+import { eq, or, and, ne, isNotNull, desc, isNull, count, lt } from 'drizzle-orm';
 import { Variables } from '../middleware/auth';
 import { z } from 'zod';
 import { zValidator } from '@hono/zod-validator';
@@ -13,8 +13,8 @@ const bountyIdSchema = z.object({
 });
 
 const paginationSchema = z.object({
-    page: z.coerce.number().int().min(1).optional().default(1),
-    limit: z.coerce.number().int().min(1).max(100).optional().default(10),
+    cursor: z.string().optional(),
+    limit: z.coerce.number().int().min(1).max(100).optional().default(20),
 });
 
 /**
@@ -149,8 +149,7 @@ conversationsRoute.get(
             }
 
             const { bountyId } = c.req.valid('param');
-            const { page, limit } = c.req.valid('query');
-            const offset = (page - 1) * limit;
+            const { cursor, limit } = c.req.valid('query');
 
             // 1. Fetch bounty details to verify existence and check user authorization
             const bounty = await db.query.bounties.findFirst({
@@ -166,30 +165,59 @@ conversationsRoute.get(
                 return c.json({ error: 'Forbidden. You are not an active participant of this bounty.' }, 403);
             }
 
-            // 2. Fetch paginated messages sorted by createdAt descending
+            // 2. Build cursor-based pagination filters
+            let whereClause: any = eq(messages.bountyId, bountyId);
+
+            if (cursor) {
+                try {
+                    const decodedCursor = JSON.parse(Buffer.from(cursor, 'base64').toString('utf-8'));
+                    const { createdAt, id } = decodedCursor;
+
+                    if (!createdAt || !id) {
+                        throw new Error('Invalid cursor payload');
+                    }
+
+                    whereClause = and(
+                        whereClause,
+                        or(
+                            lt(messages.createdAt, new Date(createdAt)),
+                            and(
+                                eq(messages.createdAt, new Date(createdAt)),
+                                lt(messages.id, id)
+                            )
+                        )
+                    );
+                } catch (e) {
+                    return c.json({ error: 'Invalid cursor' }, 400);
+                }
+            }
+
+            // 3. Fetch paginated messages sorted by createdAt descending and id descending
             const results = await db
                 .select()
                 .from(messages)
-                .where(eq(messages.bountyId, bountyId))
-                .orderBy(desc(messages.createdAt))
-                .limit(limit)
-                .offset(offset);
+                .where(whereClause)
+                .orderBy(desc(messages.createdAt), desc(messages.id))
+                .limit(limit + 1);
 
-            // 3. Get total count of messages for pagination metadata
-            const [totalCountResult] = await db
-                .select({ value: count() })
-                .from(messages)
-                .where(eq(messages.bountyId, bountyId));
+            const hasMore = results.length > limit;
+            const data = hasMore ? results.slice(0, limit) : results;
 
-            const total = totalCountResult?.value || 0;
+            let nextCursor = null;
+            if (hasMore && data.length > 0) {
+                const lastItem = data[data.length - 1];
+                nextCursor = Buffer.from(JSON.stringify({
+                    createdAt: lastItem.createdAt.toISOString(),
+                    id: lastItem.id
+                })).toString('base64');
+            }
 
             return c.json({
-                data: results,
+                data,
                 meta: {
-                    total,
-                    page,
+                    next_cursor: nextCursor,
+                    has_more: hasMore,
                     limit,
-                    totalPages: Math.ceil(total / limit),
                 },
             });
         } catch (error: any) {
