@@ -61,6 +61,8 @@ if (!process.env.JWT_PUBLIC_KEY || process.env.JWT_PUBLIC_KEY.includes('CHANGE_M
 // Warn about optional but recommended environment variables
 const optionalVars = [
     { name: 'REDIS_URL', group: 'Redis' },
+    { name: 'UPSTASH_REDIS_REST_URL', group: 'Redis' },
+    { name: 'UPSTASH_REDIS_REST_TOKEN', group: 'Redis' },
     { name: 'GITHUB_CLIENT_ID', group: 'GitHub OAuth' },
     { name: 'GITHUB_CLIENT_SECRET', group: 'GitHub OAuth' },
     { name: 'GITHUB_CALLBACK_URL', group: 'GitHub OAuth' },
