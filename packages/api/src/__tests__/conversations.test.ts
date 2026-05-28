@@ -7,12 +7,13 @@ vi.mock('hono/jwt', () => ({
     verify: vi.fn(),
 }));
 
-const { mockSelect, mockFrom, mockWhere, mockFindFirstUser, mockFindFirstMessage } = vi.hoisted(() => ({
+const { mockSelect, mockFrom, mockWhere, mockFindFirstUser, mockFindFirstMessage, mockFindFirstBounty } = vi.hoisted(() => ({
     mockSelect: vi.fn(),
     mockFrom: vi.fn(),
     mockWhere: vi.fn(),
     mockFindFirstUser: vi.fn(),
     mockFindFirstMessage: vi.fn(),
+    mockFindFirstBounty: vi.fn(),
 }));
 
 // Mock the database
@@ -27,6 +28,9 @@ vi.mock('../db', () => ({
             },
             messages: {
                 findFirst: (...args: any[]) => mockFindFirstMessage(...args),
+            },
+            bounties: {
+                findFirst: (...args: any[]) => mockFindFirstBounty(...args),
             },
         },
     },
@@ -147,5 +151,138 @@ describe('GET /api/conversations', () => {
         expect(res.status).toBe(200);
         const body = await res.json();
         expect(body).toEqual([]);
+    });
+});
+
+describe('GET /api/conversations/:bountyId/messages', () => {
+    let app: ReturnType<typeof createApp>;
+
+    beforeAll(() => {
+        app = createApp();
+        process.env.JWT_PUBLIC_KEY = '-----BEGIN PUBLIC KEY-----\nfake\n-----END PUBLIC KEY-----';
+    });
+
+    afterEach(() => {
+        vi.resetAllMocks();
+    });
+
+    it('should return 401 Unauthorized if no JWT token is provided', async () => {
+        const res = await app.request('/api/conversations/123e4567-e89b-12d3-a456-426614174000/messages');
+        expect(res.status).toBe(401);
+        const body = await res.json();
+        expect(body.error).toBe('Missing or invalid Authorization header');
+    });
+
+    it('should return 400 Bad Request if bountyId is not a valid UUID', async () => {
+        vi.mocked(verify).mockResolvedValue({
+            sub: 'user-123',
+            username: 'testuser',
+            exp: Math.floor(Date.now() / 1000) + 3600
+        });
+
+        const res = await app.request('/api/conversations/invalid-uuid/messages', {
+            headers: {
+                'Authorization': 'Bearer valid.token'
+            }
+        });
+
+        expect(res.status).toBe(400);
+    });
+
+    it('should return 404 Bounty Not Found if bounty does not exist', async () => {
+        vi.mocked(verify).mockResolvedValue({
+            sub: 'user-123',
+            username: 'testuser',
+            exp: Math.floor(Date.now() / 1000) + 3600
+        });
+
+        mockFindFirstBounty.mockResolvedValueOnce(null);
+
+        const res = await app.request('/api/conversations/123e4567-e89b-12d3-a456-426614174000/messages', {
+            headers: {
+                'Authorization': 'Bearer valid.token'
+            }
+        });
+
+        expect(res.status).toBe(404);
+        const body = await res.json();
+        expect(body.error).toBe('Bounty not found');
+    });
+
+    it('should return 403 Forbidden if user is not creator or assignee of the bounty', async () => {
+        vi.mocked(verify).mockResolvedValue({
+            sub: 'user-123',
+            username: 'testuser',
+            exp: Math.floor(Date.now() / 1000) + 3600
+        });
+
+        mockFindFirstBounty.mockResolvedValueOnce({
+            id: '123e4567-e89b-12d3-a456-426614174000',
+            creatorId: 'different-creator',
+            assigneeId: 'different-assignee',
+        });
+
+        const res = await app.request('/api/conversations/123e4567-e89b-12d3-a456-426614174000/messages', {
+            headers: {
+                'Authorization': 'Bearer valid.token'
+            }
+        });
+
+        expect(res.status).toBe(403);
+        const body = await res.json();
+        expect(body.error).toBe('Forbidden. You are not an active participant of this bounty.');
+    });
+
+    it('should successfully return paginated messages if user is creator', async () => {
+        const userId = 'user-123';
+        const bountyId = '123e4567-e89b-12d3-a456-426614174000';
+
+        vi.mocked(verify).mockResolvedValue({
+            sub: userId,
+            username: 'testuser',
+            exp: Math.floor(Date.now() / 1000) + 3600
+        });
+
+        mockFindFirstBounty.mockResolvedValueOnce({
+            id: bountyId,
+            creatorId: userId,
+            assigneeId: 'assignee-123',
+        });
+
+        const mockMessages = [
+            { id: 'msg-1', bountyId, senderId: userId, recipientId: 'assignee-123', content: 'Hello developer!', createdAt: new Date() },
+            { id: 'msg-2', bountyId, senderId: 'assignee-123', recipientId: userId, content: 'Hi creator!', createdAt: new Date() }
+        ];
+
+        // Mock chained query calls for paginated messages
+        const mockOffset = vi.fn().mockResolvedValue(mockMessages);
+        const mockLimit = vi.fn().mockReturnValue({ offset: mockOffset });
+        const mockOrderBy = vi.fn().mockReturnValue({ limit: mockLimit });
+        const mockWhere = vi.fn().mockReturnValue({ orderBy: mockOrderBy });
+        const mockFrom = vi.fn().mockReturnValue({ where: mockWhere });
+
+        // Mock count selection
+        const mockCountWhere = vi.fn().mockResolvedValue([{ value: 2 }]);
+        const mockCountFrom = vi.fn().mockReturnValue({ where: mockCountWhere });
+
+        mockSelect
+            .mockReturnValueOnce({ from: mockFrom })
+            .mockReturnValueOnce({ from: mockCountFrom });
+
+        const res = await app.request(`/api/conversations/${bountyId}/messages?page=1&limit=10`, {
+            headers: {
+                'Authorization': 'Bearer valid.token'
+            }
+        });
+
+        expect(res.status).toBe(200);
+        const body = await res.json();
+
+        expect(body.data).toHaveLength(2);
+        expect(body.data[0].id).toBe('msg-1');
+        expect(body.meta.total).toBe(2);
+        expect(body.meta.page).toBe(1);
+        expect(body.meta.limit).toBe(10);
+        expect(body.meta.totalPages).toBe(1);
     });
 });

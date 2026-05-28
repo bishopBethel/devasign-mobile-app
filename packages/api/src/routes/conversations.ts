@@ -3,8 +3,19 @@ import { db } from '../db';
 import { bounties, messages, users } from '../db/schema';
 import { eq, or, and, ne, isNotNull, desc, isNull, count } from 'drizzle-orm';
 import { Variables } from '../middleware/auth';
+import { z } from 'zod';
+import { zValidator } from '@hono/zod-validator';
 
 const conversationsRoute = new Hono<{ Variables: Variables }>();
+
+const bountyIdSchema = z.object({
+    bountyId: z.string().uuid(),
+});
+
+const paginationSchema = z.object({
+    page: z.coerce.number().int().min(1).optional().default(1),
+    limit: z.coerce.number().int().min(1).max(100).optional().default(10),
+});
 
 /**
  * GET /api/conversations
@@ -120,5 +131,72 @@ conversationsRoute.get('/', async (c) => {
         return c.json({ error: 'Failed to fetch conversations', details: error.message }, 500);
     }
 });
+
+/**
+ * GET /api/conversations/:bountyId/messages
+ * Returns a paginated list of messages for the specified bounty conversation.
+ * Verifies that the authenticated user is an active participant of the bounty (creator or assignee).
+ */
+conversationsRoute.get(
+    '/:bountyId/messages',
+    zValidator('param', bountyIdSchema),
+    zValidator('query', paginationSchema),
+    async (c) => {
+        try {
+            const user = c.get('user');
+            if (!user || !user.id) {
+                return c.json({ error: 'Unauthorized' }, 401);
+            }
+
+            const { bountyId } = c.req.valid('param');
+            const { page, limit } = c.req.valid('query');
+            const offset = (page - 1) * limit;
+
+            // 1. Fetch bounty details to verify existence and check user authorization
+            const bounty = await db.query.bounties.findFirst({
+                where: eq(bounties.id, bountyId),
+            });
+
+            if (!bounty) {
+                return c.json({ error: 'Bounty not found' }, 404);
+            }
+
+            // Verify user is participant of the bounty (creator or assignee)
+            if (bounty.creatorId !== user.id && bounty.assigneeId !== user.id) {
+                return c.json({ error: 'Forbidden. You are not an active participant of this bounty.' }, 403);
+            }
+
+            // 2. Fetch paginated messages sorted by createdAt descending
+            const results = await db
+                .select()
+                .from(messages)
+                .where(eq(messages.bountyId, bountyId))
+                .orderBy(desc(messages.createdAt))
+                .limit(limit)
+                .offset(offset);
+
+            // 3. Get total count of messages for pagination metadata
+            const [totalCountResult] = await db
+                .select({ value: count() })
+                .from(messages)
+                .where(eq(messages.bountyId, bountyId));
+
+            const total = totalCountResult?.value || 0;
+
+            return c.json({
+                data: results,
+                meta: {
+                    total,
+                    page,
+                    limit,
+                    totalPages: Math.ceil(total / limit),
+                },
+            });
+        } catch (error: any) {
+            console.error('Failed to fetch messages:', error);
+            return c.json({ error: 'Failed to fetch messages', details: error.message }, 500);
+        }
+    }
+);
 
 export default conversationsRoute;
