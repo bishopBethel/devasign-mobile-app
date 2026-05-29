@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { cached, invalidate, clearLocalCache, escapeGlob } from '../utils/cache';
+import { cached, invalidate, clearLocalCache, escapeGlob, VALID_NAMESPACE_PREFIXES } from '../utils/cache';
 
 // By default, we will mock the redis utility module
 const mockRedis = {
@@ -239,6 +239,32 @@ describe('Caching Utility', () => {
                 parts: ['*'],
                 suffix: '',
             })).rejects.toThrow(/is too broad/);
+        });
+
+        it('should reject empty string patterns', async () => {
+            await expect(invalidate('')).rejects.toThrow(/empty string/);
+            await expect(invalidate({
+                prefix: '',
+                parts: [],
+                suffix: '',
+            })).rejects.toThrow(/empty string/);
+        });
+
+        it('should reject patterns starting with a wildcard (leading wildcard)', async () => {
+            await expect(invalidate('*:foo')).rejects.toThrow(/wildcard too early/);
+            await expect(invalidate('?:bar')).rejects.toThrow(/wildcard too early/);
+        });
+
+        it('should reject patterns that lack a recognized namespace prefix', async () => {
+            await expect(invalidate('unknown:something:*')).rejects.toThrow(/namespace prefix/);
+            await expect(invalidate('foo:bar:*')).rejects.toThrow(/namespace prefix/);
+        });
+
+        it('should accept patterns with valid namespace prefixes', async () => {
+            // These should NOT throw (they have valid prefixes and enough literal chars)
+            for (const prefix of VALID_NAMESPACE_PREFIXES) {
+                await expect(invalidate(`${prefix}test:*`)).resolves.not.toThrow();
+            }
         });
     });
 });

@@ -113,6 +113,19 @@ export type InvalidatePattern =
     | { prefix: string; parts: string[]; suffix?: string };
 
 /**
+ * Allowed namespace prefixes for invalidation patterns.
+ * Every pattern passed to `invalidate()` must start with one of these.
+ */
+export const VALID_NAMESPACE_PREFIXES = [
+    'bounty:',
+    'user:',
+    'conversation:',
+    'match:',
+    'profile:',
+    'recommendation:',
+] as const;
+
+/**
  * Invalidates cache keys matching a specific glob pattern.
  * Supports Redis pattern deletion as well as in-memory wildcard matching.
  * 
@@ -129,10 +142,36 @@ export async function invalidate(pattern: InvalidatePattern): Promise<void> {
         finalPattern = pattern;
     }
 
-    // Safety Guard: Prevent cache destruction from empty, wildcard-only, or overly broad patterns
+    // Safety Guard 1: Reject empty patterns
+    if (finalPattern.length === 0) {
+        throw new Error('Invalid invalidation pattern: empty string is not allowed.');
+    }
+
+    // Safety Guard 2: Prevent cache destruction from wildcard-only or overly broad patterns
     const stripped = finalPattern.replace(/[*?\\]/g, '');
     if (stripped.length === 0) {
         throw new Error(`Invalid invalidation pattern: "${finalPattern}" is too broad and lacks literal characters.`);
+    }
+
+    // Safety Guard 3: Reject patterns starting with '*' or lacking sufficient literal prefix
+    // before the first wildcard (minimum 2 literal characters before any unescaped wildcard).
+    const firstWild = finalPattern.search(/(?<!\\)[*?]/);
+    if (firstWild !== -1 && firstWild < 2) {
+        throw new Error(
+            `Invalid invalidation pattern: "${finalPattern}" has a wildcard too early. ` +
+            'Patterns must have at least 2 literal characters before the first wildcard.'
+        );
+    }
+
+    // Safety Guard 4: Validate namespace prefix
+    const hasValidPrefix = VALID_NAMESPACE_PREFIXES.some((prefix) =>
+        finalPattern.startsWith(prefix)
+    );
+    if (!hasValidPrefix) {
+        throw new Error(
+            `Invalid invalidation pattern: "${finalPattern}" does not start with a recognized namespace prefix. ` +
+            `Allowed prefixes: ${VALID_NAMESPACE_PREFIXES.join(', ')}`,
+        );
     }
 
     if (redis) {
