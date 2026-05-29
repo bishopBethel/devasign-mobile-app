@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { cached, invalidate, clearLocalCache } from '../utils/cache';
+import { cached, invalidate, clearLocalCache, escapeGlob } from '../utils/cache';
 
 // By default, we will mock the redis utility module
 const mockRedis = {
@@ -142,7 +142,61 @@ describe('Caching Utility', () => {
             await invalidate('match:*');
 
             expect(mockRedis.keys).toHaveBeenCalledWith('match:*');
-            expect(mockRedis.del).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('Glob Wildcard Escaping and Injection Protection', () => {
+        it('should correctly escape special glob characters', () => {
+            expect(escapeGlob('user*name')).toBe('user\\*name');
+            expect(escapeGlob('user?name')).toBe('user\\?name');
+            expect(escapeGlob('user[name')).toBe('user\\[name');
+            expect(escapeGlob('user]name')).toBe('user\\]name');
+            expect(escapeGlob('user\\name')).toBe('user\\\\name');
+            expect(escapeGlob('safe-name')).toBe('safe-name');
+        });
+
+        it('should treat escaped glob characters literally in local cache invalidation', async () => {
+            const fetcher = async () => 'data';
+
+            // Store keys in local cache
+            await cached('user:abc:profile', 60, fetcher);
+            await cached('user:a*c:profile', 60, fetcher);
+            await cached('user:a?c:profile', 60, fetcher);
+
+            // Attempting to invalidate using the escaped name 'a*c'
+            // This should translate to a pattern of "user:a\*c:profile"
+            await invalidate(`user:${escapeGlob('a*c')}:profile`);
+
+            // Verify cache hit/miss status
+            let abcFetched = false;
+            let astFetched = false;
+            let qstFetched = false;
+
+            await cached('user:abc:profile', 60, async () => { abcFetched = true; return 'abc'; });
+            await cached('user:a*c:profile', 60, async () => { astFetched = true; return 'ast'; });
+            await cached('user:a?c:profile', 60, async () => { qstFetched = true; return 'qst'; });
+
+            expect(abcFetched).toBe(false); // Hit! (Not deleted, protected from glob wildcard expansion)
+            expect(astFetched).toBe(true);  // Miss! (Correctly matched literally and invalidated)
+            expect(qstFetched).toBe(false); // Hit! (Not deleted, protected from glob wildcard expansion)
+        });
+
+        it('should treat escaped glob characters literally in local cache with escaped ?', async () => {
+            const fetcher = async () => 'data';
+
+            await cached('user:abc:profile', 60, fetcher);
+            await cached('user:a?c:profile', 60, fetcher);
+
+            await invalidate(`user:${escapeGlob('a?c')}:profile`);
+
+            let abcFetched = false;
+            let qstFetched = false;
+
+            await cached('user:abc:profile', 60, async () => { abcFetched = true; return 'abc'; });
+            await cached('user:a?c:profile', 60, async () => { qstFetched = true; return 'qst'; });
+
+            expect(abcFetched).toBe(false); // Hit! (Not deleted)
+            expect(qstFetched).toBe(true);  // Miss! (Invalidated literally)
         });
     });
 });

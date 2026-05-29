@@ -8,11 +8,44 @@ interface CacheEntry<T> {
 const localCache = new Map<string, CacheEntry<any>>();
 
 /**
- * Converts a Redis glob pattern (e.g. "user:*") into a JavaScript RegExp.
+ * Escapes glob special wildcard characters (*, ?, [, ], \) in a string segment
+ * to safely interpolate user-controlled inputs into cache invalidation patterns.
+ */
+export function escapeGlob(segment: string): string {
+    return segment.replace(/[*?[\]\\]/g, '\\$&');
+}
+
+/**
+ * Converts a Redis glob pattern (e.g. "user:*") into a JavaScript RegExp,
+ * correctly supporting backslash escaping of wildcards.
  */
 function globToRegex(pattern: string): RegExp {
-    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&');
-    const regexStr = '^' + escaped.replace(/\*/g, '.*').replace(/\?/g, '.') + '$';
+    let regexStr = '^';
+    let i = 0;
+    while (i < pattern.length) {
+        const char = pattern[i];
+        if (char === '\\') {
+            // Escaped character - treat the next character literally
+            const nextChar = pattern[i + 1];
+            if (nextChar !== undefined) {
+                regexStr += nextChar.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                i += 2;
+            } else {
+                regexStr += '\\\\';
+                i++;
+            }
+        } else if (char === '*') {
+            regexStr += '.*';
+            i++;
+        } else if (char === '?') {
+            regexStr += '.';
+            i++;
+        } else {
+            regexStr += char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            i++;
+        }
+    }
+    regexStr += '$';
     return new RegExp(regexStr);
 }
 
@@ -80,6 +113,10 @@ export async function cached<T>(
  * Supports Redis pattern deletion as well as in-memory wildcard matching.
  * 
  * @param pattern Wildcard pattern to match (e.g. "bounty:recommended:*" or "user:123").
+ *                WARNING: To prevent cache injection or deletion of unrelated data,
+ *                do NOT interpolate raw user-controlled values directly into the pattern.
+ *                Escape them first using `escapeGlob`.
+ *                Example: `invalidate(\`user:\${escapeGlob(userId)}:*\`)`
  */
 export async function invalidate(pattern: string): Promise<void> {
     if (redis) {
