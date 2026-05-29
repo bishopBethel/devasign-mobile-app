@@ -108,28 +108,51 @@ export async function cached<T>(
     return freshValue;
 }
 
+export type InvalidatePattern = 
+    | string 
+    | { prefix: string; parts: string[]; suffix?: string };
+
 /**
  * Invalidates cache keys matching a specific glob pattern.
  * Supports Redis pattern deletion as well as in-memory wildcard matching.
  * 
- * @param pattern Wildcard pattern to match (e.g. "bounty:recommended:*" or "user:123").
- *                WARNING: To prevent cache injection or deletion of unrelated data,
- *                do NOT interpolate raw user-controlled values directly into the pattern.
- *                Escape them first using `escapeGlob`.
- *                Example: `invalidate(\`user:\${escapeGlob(userId)}:*\`)`
+ * @param pattern Wildcard pattern to match (e.g. "bounty:recommended:*") or a structured
+ *                object that escapes user-controlled segments internally.
+ *                Example structured usage: `invalidate({ prefix: "user:", parts: [userId], suffix: ":*" })`
  */
-export async function invalidate(pattern: string): Promise<void> {
+export async function invalidate(pattern: InvalidatePattern): Promise<void> {
+    let finalPattern: string;
+    if (typeof pattern === 'object') {
+        const escapedParts = pattern.parts.map(escapeGlob);
+        finalPattern = pattern.prefix + escapedParts.join(':') + (pattern.suffix ?? '');
+    } else {
+        finalPattern = pattern;
+    }
+
+    // Safety Guard: Prevent cache destruction from empty, wildcard-only, or overly broad patterns
+    const stripped = finalPattern.replace(/[*?\\]/g, '');
+    if (stripped.length === 0) {
+        throw new Error(`Invalid invalidation pattern: "${finalPattern}" is too broad and lacks literal characters.`);
+    }
+
     if (redis) {
         try {
-            const keys = await redis.keys(pattern);
-            if (keys && keys.length > 0) {
-                await redis.del(...keys);
-            }
+            let cursor = '0';
+            do {
+                const [nextCursor, keys] = await redis.scan(cursor, {
+                    match: finalPattern,
+                    count: 100,
+                });
+                cursor = String(nextCursor);
+                if (keys && keys.length > 0) {
+                    await redis.del(...keys);
+                }
+            } while (cursor !== '0');
         } catch (error) {
-            console.error(`Error invalidating keys for pattern "${pattern}" in Redis:`, error);
+            console.error(`Error invalidating keys for pattern "${finalPattern}" in Redis:`, error);
         }
     } else {
-        const regex = globToRegex(pattern);
+        const regex = globToRegex(finalPattern);
         for (const key of localCache.keys()) {
             if (regex.test(key)) {
                 localCache.delete(key);

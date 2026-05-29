@@ -5,7 +5,7 @@ import { cached, invalidate, clearLocalCache, escapeGlob } from '../utils/cache'
 const mockRedis = {
     get: vi.fn(),
     set: vi.fn(),
-    keys: vi.fn(),
+    scan: vi.fn(),
     del: vi.fn(),
 };
 
@@ -126,22 +126,29 @@ describe('Caching Utility', () => {
             );
         });
 
-        it('should call keys scan and del on invalidate', async () => {
-            mockRedis.keys.mockResolvedValueOnce(['match:1', 'match:2']);
+        it('should call scan and del on invalidate', async () => {
+            mockRedis.scan.mockResolvedValueOnce(['0', ['match:1', 'match:2']]);
             mockRedis.del.mockResolvedValueOnce(2);
 
             await invalidate('match:*');
 
-            expect(mockRedis.keys).toHaveBeenCalledWith('match:*');
+            expect(mockRedis.scan).toHaveBeenCalledWith('0', {
+                match: 'match:*',
+                count: 100,
+            });
             expect(mockRedis.del).toHaveBeenCalledWith('match:1', 'match:2');
         });
 
         it('should not call del if no matching keys found during invalidate', async () => {
-            mockRedis.keys.mockResolvedValueOnce([]);
+            mockRedis.scan.mockResolvedValueOnce(['0', []]);
 
             await invalidate('match:*');
 
-            expect(mockRedis.keys).toHaveBeenCalledWith('match:*');
+            expect(mockRedis.scan).toHaveBeenCalledWith('0', {
+                match: 'match:*',
+                count: 100,
+            });
+            expect(mockRedis.del).not.toHaveBeenCalled();
         });
     });
 
@@ -197,6 +204,41 @@ describe('Caching Utility', () => {
 
             expect(abcFetched).toBe(false); // Hit! (Not deleted)
             expect(qstFetched).toBe(true);  // Miss! (Invalidated literally)
+        });
+
+        it('should support structured invalidation using prefix, parts, and suffix', async () => {
+            const fetcher = async () => 'data';
+
+            await cached('user:abc:profile', 60, fetcher);
+            await cached('user:a*c:profile', 60, fetcher);
+
+            // Invalidate using structured input
+            await invalidate({
+                prefix: 'user:',
+                parts: ['a*c'],
+                suffix: ':profile',
+            });
+
+            let abcFetched = false;
+            let astFetched = false;
+
+            await cached('user:abc:profile', 60, async () => { abcFetched = true; return 'abc'; });
+            await cached('user:a*c:profile', 60, async () => { astFetched = true; return 'ast'; });
+
+            expect(abcFetched).toBe(false); // Hit! (Not deleted, escaped correctly)
+            expect(astFetched).toBe(true);  // Miss! (Deleted)
+        });
+
+        it('should reject overly broad patterns lacking literal characters', async () => {
+            await expect(invalidate('*')).rejects.toThrow(/is too broad/);
+            await expect(invalidate('**')).rejects.toThrow(/is too broad/);
+            await expect(invalidate('?')).rejects.toThrow(/is too broad/);
+            await expect(invalidate('\\*')).rejects.toThrow(/is too broad/);
+            await expect(invalidate({
+                prefix: '',
+                parts: ['*'],
+                suffix: '',
+            })).rejects.toThrow(/is too broad/);
         });
     });
 });
